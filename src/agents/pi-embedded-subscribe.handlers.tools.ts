@@ -14,6 +14,7 @@ import {
 } from "../infra/agent-events.js";
 import type { ExecApprovalDecision } from "../infra/exec-approvals.js";
 import type { PluginHookAfterToolCallEvent } from "../plugins/types.js";
+import { emitMetisExecResultAudit } from "../metis/audit.js";
 import { normalizeOptionalLowercaseString, readStringValue } from "../shared/string-coerce.js";
 import type { ApplyPatchSummary } from "./apply-patch.js";
 import type { ExecToolDetails } from "./bash-tools.exec-types.js";
@@ -1142,14 +1143,26 @@ export async function handleToolExecutionEnd(
 
   // Run after_tool_call plugin hook (fire-and-forget)
   const hookRunnerAfter = ctx.hookRunner ?? (await loadHookRunnerGlobal()).getGlobalHookRunner();
+  const { consumeAdjustedParamsForToolCall } = await loadBeforeToolCall();
+  const adjustedArgs = consumeAdjustedParamsForToolCall(toolCallId, runId);
+  const afterToolCallArgs =
+    adjustedArgs && typeof adjustedArgs === "object"
+      ? (adjustedArgs as Record<string, unknown>)
+      : startArgs;
+  const durationMs = startData?.startTime != null ? Date.now() - startData.startTime : undefined;
+  void emitMetisExecResultAudit({
+    toolName,
+    runId,
+    toolCallId,
+    sessionKey: ctx.params.sessionKey,
+    sessionId: ctx.params.sessionId,
+    toolParams: afterToolCallArgs,
+    result: sanitizedResult,
+    error: isToolError ? extractToolErrorMessage(sanitizedResult) : undefined,
+    durationMs,
+  }).catch(() => {});
+
   if (hookRunnerAfter?.hasHooks("after_tool_call")) {
-    const { consumeAdjustedParamsForToolCall } = await loadBeforeToolCall();
-    const adjustedArgs = consumeAdjustedParamsForToolCall(toolCallId, runId);
-    const afterToolCallArgs =
-      adjustedArgs && typeof adjustedArgs === "object"
-        ? (adjustedArgs as Record<string, unknown>)
-        : startArgs;
-    const durationMs = startData?.startTime != null ? Date.now() - startData.startTime : undefined;
     const hookEvent: PluginHookAfterToolCallEvent = {
       toolName,
       params: afterToolCallArgs,
