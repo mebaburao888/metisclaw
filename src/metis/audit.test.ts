@@ -22,6 +22,37 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+async function setupManagedAuditEnv() {
+  const root = await makeTempDir();
+  const managedConfigPath = path.join(root, "managed-config.json");
+  const policyPath = path.join(root, "policy.json");
+  const auditLogPath = path.join(root, "metis-audit.jsonl");
+
+  await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
+  await writeJson(policyPath, {
+    orgId: "metis",
+    policyVersion: 1,
+    managedMode: true,
+    tools: { exec: { requireApproval: true } },
+  });
+
+  vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+  vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+  vi.stubEnv("OPENCLAW_METIS_AUDIT_LOG_PATH", auditLogPath);
+  invalidateMetisManagedRuntimeCache();
+
+  return { auditLogPath };
+}
+
+async function readAuditEvents(auditLogPath: string) {
+  const raw = await fs.readFile(auditLogPath, "utf8");
+  return raw
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 describe("metis audit semantics", () => {
   it("marks requireApproval preflight as pending instead of approved", async () => {
     const decision = normalizeExecDecision({
@@ -43,23 +74,7 @@ describe("metis audit semantics", () => {
   });
 
   it("writes approval requested and resolved audit events with distinct states", async () => {
-    const root = await makeTempDir();
-    const managedConfigPath = path.join(root, "managed-config.json");
-    const policyPath = path.join(root, "policy.json");
-    const auditLogPath = path.join(root, "metis-audit.jsonl");
-
-    await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
-    await writeJson(policyPath, {
-      orgId: "metis",
-      policyVersion: 1,
-      managedMode: true,
-      tools: { exec: { requireApproval: true } },
-    });
-
-    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
-    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
-    vi.stubEnv("OPENCLAW_METIS_AUDIT_LOG_PATH", auditLogPath);
-    invalidateMetisManagedRuntimeCache();
+    const { auditLogPath } = await setupManagedAuditEnv();
 
     const decision = normalizeExecDecision({
       managedMode: true,
@@ -93,12 +108,7 @@ describe("metis audit semantics", () => {
       sessionKey: "session-1",
     });
 
-    const raw = await fs.readFile(auditLogPath, "utf8");
-    const events = raw
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const events = await readAuditEvents(auditLogPath);
 
     expect(events).toHaveLength(3);
     expect(events[0]).toMatchObject({
@@ -119,5 +129,63 @@ describe("metis audit semantics", () => {
       decision: "requireApproval",
       reason: "allow-once",
     });
+  });
+
+  it.each([
+    ["allow-always", "approved"],
+    ["deny", "denied"],
+    ["timeout", "timeout"],
+    ["cancelled", "cancelled"],
+  ] as const)("maps %s resolution to %s audit result", async (resolution, expectedResult) => {
+    const { auditLogPath } = await setupManagedAuditEnv();
+
+    await emitMetisExecApprovalResolvedAudit({
+      resolution,
+      toolCallId: `tool-${resolution}`,
+      command: "echo hi",
+      sessionKey: "session-1",
+    });
+
+    const events = await readAuditEvents(auditLogPath);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: "tool.exec.approval_resolved",
+      result: expectedResult,
+      decision: "requireApproval",
+      reason: resolution,
+    });
+  });
+
+  it("preserves audit event ordering for approval flow", async () => {
+    const { auditLogPath } = await setupManagedAuditEnv();
+    const decision = normalizeExecDecision({
+      managedMode: true,
+      command: "echo hi",
+      policySnapshot: {
+        status: "loaded",
+        policy: {
+          orgId: "metis",
+          policyVersion: 1,
+          managedMode: true,
+          tools: { exec: { requireApproval: true } },
+        },
+      },
+    });
+
+    await emitMetisExecPreflightAudit({ decision, toolCallId: "tool-order", command: "echo hi" });
+    await emitMetisExecApprovalRequestedAudit({ toolCallId: "tool-order", command: "echo hi" });
+    await emitMetisExecApprovalResolvedAudit({
+      resolution: "deny",
+      toolCallId: "tool-order",
+      command: "echo hi",
+    });
+
+    const events = await readAuditEvents(auditLogPath);
+    expect(events.map((event) => event.eventType)).toEqual([
+      "tool.exec.preflight",
+      "tool.exec.approval_requested",
+      "tool.exec.approval_resolved",
+    ]);
+    expect(events.map((event) => event.result)).toEqual(["pending", "pending", "denied"]);
   });
 });

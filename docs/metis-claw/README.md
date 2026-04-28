@@ -22,5 +22,23 @@ This fork currently expects Metis-managed files in the OpenClaw state directory.
   - `tool.exec.approval_requested` records request/pending
   - `tool.exec.approval_resolved` records approved/denied/timeout/cancelled outcome
 
-## Important pilot limitation
-Policy/config are cached for process lifetime right now. Restart is required for changes to take effect.
+## Cache and restart behavior
+Policy/config are cached for process lifetime right now.
+
+What that means today:
+- Editing `managed-config.json` does **not** hot-reload
+- Editing `policy.json` does **not** hot-reload
+- Changing any `OPENCLAW_METIS_*_PATH` override does **not** hot-reload
+- A process restart is required before Metis will re-read those files
+
+Operationally, treat config/policy changes as a restart-required action for this pilot.
+
+## Current file expectations
+Required for managed mode:
+- `managed-config.json` must contain `enterprise.managedMode: true` and a valid `enterprise.orgId`
+- `policy.json` must contain a matching `orgId`, numeric `policyVersion`, and valid `tools.exec` object when present
+
+Ignored / not yet implemented in this slice:
+- live file watching
+- runtime cache invalidation on disk change
+- admin-side policy distribution / sync
