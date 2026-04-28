@@ -85,6 +85,72 @@ describe("metis managed exec policy", () => {
     });
   });
 
+  it("blocks exec matching a deny pattern", async () => {
+    const root = await makeTempDir();
+    const managedConfigPath = path.join(root, "managed-config.json");
+    const policyPath = path.join(root, "policy.json");
+    await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
+    await writeJson(policyPath, {
+      orgId: "metis",
+      policyVersion: 1,
+      managedMode: true,
+      tools: { exec: { enabled: true, denyPatterns: ["rm -rf", "curl | sh"] } },
+    });
+
+    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+    invalidateMetisManagedRuntimeCache();
+
+    const blockedOutcome = await runBeforeToolCallHook({
+      toolName: "exec",
+      params: { command: "rm -rf /tmp/important" },
+    });
+    expect(blockedOutcome).toMatchObject({
+      blocked: true,
+      reason: expect.stringMatching(/denied pattern/i),
+    });
+
+    invalidateMetisManagedRuntimeCache();
+    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+
+    const allowedOutcome = await runBeforeToolCallHook({
+      toolName: "exec",
+      params: { command: "echo hello" },
+    });
+    expect(allowedOutcome).toMatchObject({ blocked: false });
+  });
+
+  it("fails closed when policy shape is invalid", async () => {
+    const root = await makeTempDir();
+    const managedConfigPath = path.join(root, "managed-config.json");
+    const policyPath = path.join(root, "policy.json");
+    await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
+    await writeJson(policyPath, {
+      orgId: "metis",
+      policyVersion: "not-a-number",
+      managedMode: true,
+    });
+
+    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+    invalidateMetisManagedRuntimeCache();
+
+    const ctx = await getMetisManagedRuntimeContext(process.env);
+    expect(ctx.managedMode).toBe(true);
+    expect(ctx.policySnapshot.status).toBe("invalid_policy");
+    expect(ctx.policy).toBeNull();
+
+    const outcome = await runBeforeToolCallHook({
+      toolName: "exec",
+      params: { command: "echo hello" },
+    });
+    expect(outcome).toEqual({
+      blocked: true,
+      reason: "Metis Claw blocked exec because managed policy is unavailable",
+    });
+  });
+
   it("fails closed when managed config orgId does not match policy orgId", async () => {
     const root = await makeTempDir();
     const managedConfigPath = path.join(root, "managed-config.json");
