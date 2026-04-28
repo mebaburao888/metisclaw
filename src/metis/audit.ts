@@ -81,7 +81,7 @@ export async function emitMetisExecPreflightAudit(params: {
   });
 }
 
-export async function emitMetisExecApprovalAudit(params: {
+export async function emitMetisExecApprovalRequestedAudit(params: {
   toolCallId?: string;
   sessionKey?: string;
   sessionId?: string;
@@ -94,10 +94,49 @@ export async function emitMetisExecApprovalAudit(params: {
   }
   await appendMetisAuditEvent({
     timestamp: new Date().toISOString(),
-    eventType: "tool.exec.approval",
-    result: "approved",
+    eventType: "tool.exec.approval_requested",
+    result: "pending",
     decision: "requireApproval",
     reason: "approval_required",
+    tool: "exec",
+    toolPhase: "before_tool_call",
+    managedMode: ctx.managedMode,
+    orgId: ctx.enterprise?.orgId,
+    policyVersion: ctx.policy?.policyVersion,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    runId: params.runId,
+    toolCallId: params.toolCallId,
+    metadata: { command: params.command },
+  });
+}
+
+export async function emitMetisExecApprovalResolvedAudit(params: {
+  resolution: "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled";
+  toolCallId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  command: string;
+}): Promise<void> {
+  const ctx = await getMetisManagedRuntimeContext(process.env);
+  if (!ctx.managedMode) {
+    return;
+  }
+  const result =
+    params.resolution === "allow-once" || params.resolution === "allow-always"
+      ? "approved"
+      : params.resolution === "deny"
+        ? "denied"
+        : params.resolution === "timeout"
+          ? "timeout"
+          : "cancelled";
+  await appendMetisAuditEvent({
+    timestamp: new Date().toISOString(),
+    eventType: "tool.exec.approval_resolved",
+    result,
+    decision: "requireApproval",
+    reason: params.resolution,
     tool: "exec",
     toolPhase: "before_tool_call",
     managedMode: ctx.managedMode,

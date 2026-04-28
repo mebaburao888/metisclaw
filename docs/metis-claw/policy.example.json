@@ -1,0 +1,16 @@
+{
+  "orgId": "metis",
+  "policyVersion": 1,
+  "managedMode": true,
+  "tools": {
+    "exec": {
+      "enabled": true,
+      "requireApproval": true,
+      "denyPatterns": [
+        "rm -rf",
+        "curl | sh",
+        "powershell -enc"
+      ]
+    }
+  }
+}

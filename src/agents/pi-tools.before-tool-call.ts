@@ -18,7 +18,11 @@ import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { copyPluginToolMeta } from "../plugins/tools.js";
 import { PluginApprovalResolutions, type PluginApprovalResolution } from "../plugins/types.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
-import { emitMetisExecApprovalAudit, emitMetisExecPreflightAudit } from "../metis/audit.js";
+import {
+  emitMetisExecApprovalRequestedAudit,
+  emitMetisExecApprovalResolvedAudit,
+  emitMetisExecPreflightAudit,
+} from "../metis/audit.js";
 import {
   getMetisManagedRuntimeContext,
   normalizeExecDecision,
@@ -433,7 +437,7 @@ export async function runBeforeToolCallHook(args: {
       };
     }
     if (decision.action === "requireApproval") {
-      void emitMetisExecApprovalAudit({
+      void emitMetisExecApprovalRequestedAudit({
         toolCallId: args.toolCallId,
         sessionKey: args.ctx?.sessionKey,
         sessionId: args.ctx?.sessionId,
@@ -450,6 +454,15 @@ export async function runBeforeToolCallHook(args: {
           severity: "warning",
           timeoutMs: 120_000,
           timeoutBehavior: "deny",
+          onResolution: (resolution) =>
+            emitMetisExecApprovalResolvedAudit({
+              resolution,
+              toolCallId: args.toolCallId,
+              sessionKey: args.ctx?.sessionKey,
+              sessionId: args.ctx?.sessionId,
+              runId: args.ctx?.runId,
+              command,
+            }),
         },
         originalParams: params,
         toolName,

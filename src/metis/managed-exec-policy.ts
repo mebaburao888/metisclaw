@@ -98,7 +98,7 @@ export type MetisExecDecision = {
   matchedPattern?: string;
   audit: {
     eventType: "tool.exec.preflight";
-    result: "allowed" | "blocked" | "approved";
+    result: "allowed" | "blocked" | "pending";
     decision: "allow" | "deny" | "requireApproval";
     reason: MetisExecDecisionReason;
     matchedPattern?: string;
@@ -414,7 +414,7 @@ export function normalizeExecDecision(params: {
       reason: "approval_required",
       audit: {
         eventType: "tool.exec.preflight",
-        result: "approved",
+        result: "pending",
         decision: "requireApproval",
         reason: "approval_required",
       },
