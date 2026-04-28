@@ -9,6 +9,8 @@ export type MetisPolicySnapshotStatus =
   | "missing"
   | "invalid_json"
   | "invalid_policy"
+  | "invalid_managed_config"
+  | "org_mismatch"
   | "read_error";
 
 export type MetisPolicyIssue = {
@@ -40,6 +42,28 @@ export type ManagedConfig = {
     channel?: string;
   };
 };
+
+function validateManagedConfigShape(config: unknown, managedConfigPath: string): MetisPolicyIssue[] {
+  const issues: MetisPolicyIssue[] = [];
+  if (!isRecord(config)) {
+    return [{ path: managedConfigPath, message: "managed config must be an object" }];
+  }
+  if (!isRecord(config.enterprise)) {
+    issues.push({ path: managedConfigPath, message: "managed config.enterprise must be an object" });
+    return issues;
+  }
+  if (typeof config.enterprise.managedMode !== "boolean") {
+    issues.push({ path: managedConfigPath, message: "managed config.enterprise.managedMode must be a boolean" });
+  }
+  if (
+    "orgId" in config.enterprise &&
+    config.enterprise.orgId !== undefined &&
+    (typeof config.enterprise.orgId !== "string" || !config.enterprise.orgId.trim())
+  ) {
+    issues.push({ path: managedConfigPath, message: "managed config.enterprise.orgId must be a non-empty string when provided" });
+  }
+  return issues;
+}
 
 export type MetisPolicySnapshot = {
   status: MetisPolicySnapshotStatus;
@@ -182,23 +206,42 @@ export async function loadManagedRuntimeContext(
   const { managedConfigPath, policyPath } = resolveMetisPaths(env);
   const managedRead = await readJsonFile(managedConfigPath, "managed config");
   if (!managedRead.ok) {
+    const managementIntent = managedRead.status !== "missing";
     return {
-      managedMode: false,
+      managedMode: managementIntent,
       enterprise: {},
       policy: null,
       policySnapshot: {
-        status: "disabled",
+        status: managedRead.status === "missing" ? "disabled" : "invalid_managed_config",
         loadedAt: new Date().toISOString(),
         managedConfigPath,
         policyPath,
         issues: managedRead.issues,
       },
       policyIssues: managedRead.issues,
-      source: "disabled",
+      source: managedRead.status === "missing" ? "disabled" : "policy-unavailable",
     };
   }
 
-  const managedConfig = (isRecord(managedRead.value) ? managedRead.value : {}) as ManagedConfig;
+  const managedConfigIssues = validateManagedConfigShape(managedRead.value, managedConfigPath);
+  if (managedConfigIssues.length > 0) {
+    return {
+      managedMode: true,
+      enterprise: {},
+      policy: null,
+      policySnapshot: {
+        status: "invalid_managed_config",
+        loadedAt: new Date().toISOString(),
+        managedConfigPath,
+        policyPath,
+        issues: managedConfigIssues,
+      },
+      policyIssues: managedConfigIssues,
+      source: "policy-unavailable",
+    };
+  }
+
+  const managedConfig = managedRead.value as ManagedConfig;
   const managedMode = managedConfig.enterprise?.managedMode === true;
   if (!managedMode) {
     return {
@@ -254,6 +297,30 @@ export async function loadManagedRuntimeContext(
   }
 
   const policy = policyRead.value as MetisPolicy;
+  const configuredOrgId = managedConfig.enterprise?.orgId?.trim();
+  if (configuredOrgId && configuredOrgId !== policy.orgId) {
+    const issues = [
+      {
+        path: policyPath,
+        message: `policy.orgId (${policy.orgId}) does not match managed config enterprise.orgId (${configuredOrgId})`,
+      },
+    ];
+    return {
+      managedMode: true,
+      enterprise: managedConfig.enterprise ?? {},
+      policy: null,
+      policySnapshot: {
+        status: "org_mismatch",
+        loadedAt: new Date().toISOString(),
+        managedConfigPath,
+        policyPath,
+        issues,
+      },
+      policyIssues: issues,
+      source: "policy-unavailable",
+    };
+  }
+
   return {
     managedMode: true,
     enterprise: managedConfig.enterprise ?? {},
