@@ -85,6 +85,51 @@ describe("metis managed exec policy", () => {
     });
   });
 
+  it("returns the same cached context on repeated calls without invalidation", async () => {
+    const root = await makeTempDir();
+    const managedConfigPath = path.join(root, "managed-config.json");
+    const policyPath = path.join(root, "policy.json");
+    await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
+    await writeJson(policyPath, { orgId: "metis", policyVersion: 1, managedMode: true });
+
+    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+    invalidateMetisManagedRuntimeCache();
+
+    const first = await getMetisManagedRuntimeContext(process.env);
+    expect(first.policySnapshot.status).toBe("loaded");
+
+    // overwrite policy on disk — cache should still return the old context
+    await writeJson(policyPath, { orgId: "metis", policyVersion: 99, managedMode: true });
+
+    const second = await getMetisManagedRuntimeContext(process.env);
+    expect(second).toBe(first); // exact same object reference = cached
+    expect(second.policy?.policyVersion).toBe(1); // old value, not 99
+  });
+
+  it("re-reads policy from disk after cache invalidation", async () => {
+    const root = await makeTempDir();
+    const managedConfigPath = path.join(root, "managed-config.json");
+    const policyPath = path.join(root, "policy.json");
+    await writeJson(managedConfigPath, { enterprise: { managedMode: true, orgId: "metis" } });
+    await writeJson(policyPath, { orgId: "metis", policyVersion: 1, managedMode: true });
+
+    vi.stubEnv("OPENCLAW_METIS_MANAGED_CONFIG_PATH", managedConfigPath);
+    vi.stubEnv("OPENCLAW_METIS_POLICY_PATH", policyPath);
+    invalidateMetisManagedRuntimeCache();
+
+    const first = await getMetisManagedRuntimeContext(process.env);
+    expect(first.policy?.policyVersion).toBe(1);
+
+    // overwrite policy, then explicitly invalidate
+    await writeJson(policyPath, { orgId: "metis", policyVersion: 99, managedMode: true });
+    invalidateMetisManagedRuntimeCache();
+
+    const second = await getMetisManagedRuntimeContext(process.env);
+    expect(second).not.toBe(first); // new object = fresh load
+    expect(second.policy?.policyVersion).toBe(99);
+  });
+
   it("blocks exec matching a deny pattern", async () => {
     const root = await makeTempDir();
     const managedConfigPath = path.join(root, "managed-config.json");
