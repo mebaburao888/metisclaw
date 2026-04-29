@@ -1,6 +1,6 @@
 # Metis Claw — Product Architecture
 
-> **Status:** Living document · v0.1 · 2026-04-29  
+> **Status:** Living document · v0.2 · 2026-04-29 (decisions locked)  
 > **Author:** Babu Rao (AI architect) + H  
 > **Purpose:** Blueprint for transforming the current enforcement prototype into a full managed-client product.
 
@@ -27,11 +27,11 @@ The difference: certain settings are **locked by their organization** and cannot
 
 | Principle | What it means |
 |---|---|
-| **Fail-closed** | If policy is missing, invalid, or unreachable → block, never open |
+| **Fail-restricted** | If policy is missing/unreachable → block only restricted features; user can still work on unrestricted operations |
 | **Dual enforcement** | UI lock + backend enforcement. Never one without the other. |
 | **Transparent to users** | Users see what is locked and why. Not silent black boxes. |
 | **Admin-owned, client-enforced** | Admin sets policy centrally. Client enforces it locally. |
-| **Tenant-isolated** | One policy server can serve multiple orgs. Policies never bleed across tenants. |
+| **Single-tenant** | One org, one admin. No multi-tenant complexity in v1. |
 
 ---
 
@@ -143,10 +143,21 @@ This is the canonical policy document that flows from admin → clients.
     "allowLocalConfig": false             // block local config overrides entirely
   },
 
+  "fileSharing": {
+    "logEnabled": true,              // log every file share/attachment event
+    "extractClientNames": true        // parse and surface client names found in shared files
+  },
+
+  "usage": {
+    "tokenTracking": true,            // track tokens consumed per user per model
+    "modelTracking": true,            // log which model was used for each session
+    "authTypeTracking": true          // log auth type per model call: api_key | oauth | service_account
+  },
+
   "audit": {
     "enabled": true,
     "endpoint": "https://metis.example.com/api/audit",
-    "events": ["exec", "model_switch", "skill_install", "tool_call"]
+    "events": ["exec", "model_switch", "skill_install", "tool_call", "file_share", "token_usage"]
   }
 }
 ```
@@ -160,9 +171,10 @@ This is the canonical policy document that flows from admin → clients.
 User installs Metis OpenClaw
        │
        ▼
-Client reads enrollment token from:
-  - ENV var: METIS_ENROLLMENT_TOKEN
-  - or: metis-config.json in install dir
+Client prompts user on first run:
+  - UI dialog: "Enter your Metis enrollment token"
+  - Token provided by admin out-of-band (email, Slack, etc.)
+  - Stored locally after successful enrollment
        │
        ▼
 Client calls: POST /api/enroll
@@ -222,8 +234,12 @@ POST /api/audit  (batched, max 50 events per call)
 
 ### Phase 2 (next)
 - [ ] model allow/block list enforcement
+- [ ] model + auth type tracking
+- [ ] token usage tracking per user per model
+- [ ] file share logging + client name extraction
 - [ ] central policy server (REST API + DB)
-- [ ] client enrollment + policy pull
+- [ ] client enrollment (manual token entry on first run)
+- [ ] policy pull + cache
 - [ ] skill install governance
 - [ ] tool allow/deny beyond exec
 
@@ -235,11 +251,27 @@ POST /api/audit  (batched, max 50 events per call)
 - [ ] emergency policy push (force refresh without polling interval)
 
 ### Phase 4
-- [ ] multi-tenant org support
-- [ ] role-based admin access (admin vs viewer vs per-dept policy editor)
+- [ ] role-based admin access (admin vs viewer)
 - [ ] compliance export (SOC2-ready audit trail)
 - [ ] SSO / SAML for admin console
 - [ ] desktop notification on admin policy change
+- [ ] multi-tenant (future, not v1)
+
+---
+
+## Fail-Restricted Behavior
+
+When policy server is unreachable or policy fetch fails:
+
+| Feature | Behavior |
+|---|---|
+| Exec | Blocked if `requireApproval` or any deny patterns were last set |
+| Blocked models | Stay blocked (last known policy enforced) |
+| File share logging | Queue locally, upload when reconnected |
+| Unrestricted features | Continue working normally |
+| Token/model tracking | Queue locally, upload when reconnected |
+
+Users see a banner: `"⚠️ Metis policy server unreachable — restricted features are paused"`
 
 ---
 
@@ -306,6 +338,11 @@ Login (Metis Admin)
 │     List of enrolled machines, last-seen, policy version, platform
 │     Option: revoke a client
 │
+├── Usage & Tracking
+│     Token consumption per user per model
+│     Model usage breakdown (which model, which auth type)
+│     File share log (filename, client names extracted, timestamp)
+│
 ├── Audit Log
 │     Filterable by: client, event type, result, date range
 │     Exportable to CSV
@@ -330,10 +367,13 @@ Login (Metis Admin)
 - **State:** React Query for API fetching
 
 ### Client Changes (Metis OpenClaw fork)
-- New module: `src/metis/policy-client.ts` — enrollment + fetch + cache
-- New module: `src/metis/audit-uploader.ts` — batched event upload
+- New module: `src/metis/policy-client.ts` — enrollment (manual token entry) + fetch + cache
+- New module: `src/metis/audit-uploader.ts` — batched event upload with local queue
+- New module: `src/metis/usage-tracker.ts` — token + model + auth type tracking
+- New module: `src/metis/file-share-monitor.ts` — intercept file shares, log + extract client names
 - Existing: `src/metis/managed-exec-policy.ts` — already built
 - UI changes: lock layer in existing settings components
+- UI changes: enrollment token prompt on first run
 
 ---
 
@@ -380,15 +420,28 @@ Week 11-12: Polish + Pilot
 
 ## What Makes Metis Defensible
 
-Three things make this hard to replicate quickly:
+Four things make this hard to replicate quickly:
 
-1. **Deep fork** — the enforcement is in the gateway layer, not a surface wrapper. Bypassing it requires modifying the binary.
+1. **Deep fork** — enforcement is in the gateway layer. Bypassing requires modifying the binary.
 
-2. **Dual enforcement** — UI lock + backend enforcement at the same time. Cosmetic-only or backend-only approaches are both weaker.
+2. **Dual enforcement** — UI lock + backend enforcement together. Neither alone is enough.
 
-3. **Audit trail** — enterprise buyers care about compliance. A policy that silently enforces with no record is less valuable than one that produces a tamper-evident log.
+3. **Audit trail** — tamper-evident log of every exec decision, model switch, file share, and approval.
 
-These three together = something enterprise buyers will pay for.
+4. **Usage intelligence** — token tracking, model tracking, auth type tracking. Admins see exactly what their team is spending on AI, on which models, and how they're authenticating. That's a purchasing insight layer most tools don't have.
+
+These four together = something enterprise buyers will pay for.
+
+## Locked Decisions (v0.2)
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Failure mode | Fail-restricted (not fail-closed) | Users can still work; only restricted ops pause |
+| User visibility | Transparent — users see what's locked | Trust + compliance clarity |
+| Enrollment | Manual token entry on first run | Simple, no bundled secrets in installer |
+| Tenant model | Single-tenant v1 | Simpler to ship; multi-tenant is future |
+| File shares | Logged + client name extracted | Compliance + visibility into what's being shared |
+| Usage | Token + model + auth type tracked | Admin visibility into AI spend and access patterns |
 
 ---
 
